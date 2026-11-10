@@ -34,6 +34,15 @@
   - [5.16 Publishing](#516-publishing)
   - [5.17 Mock Mode](#517-mock-mode)
   - [5.18 Microfrontend Plugin](#518-microfrontend-plugin)
+  - [5.19 Telemetry: Event API and Catalog](#519-telemetry-event-api-and-catalog)
+  - [5.20 Telemetry: Capture](#520-telemetry-capture)
+  - [5.21 Telemetry: Funnels](#521-telemetry-funnels)
+  - [5.22 Telemetry: MFE Channel](#522-telemetry-mfe-channel)
+  - [5.23 Telemetry: Performance Metrics](#523-telemetry-performance-metrics)
+  - [5.24 Telemetry: Transports and Adapters](#524-telemetry-transports-and-adapters)
+  - [5.25 Telemetry: Consent and Identity](#525-telemetry-consent-and-identity)
+  - [5.26 Telemetry: Agent Harness](#526-telemetry-agent-harness)
+  - [5.27 Telemetry: Verification](#527-telemetry-verification)
 - [6. Non-Functional Requirements](#6-non-functional-requirements)
   - [6.1 NFR Inclusions](#61-nfr-inclusions)
   - [6.2 NFR Exclusions](#62-nfr-exclusions)
@@ -66,6 +75,7 @@ Modern UI frameworks optimize for component reuse and visual design, but fail at
 - **Screensets Siloed**: Individual teams own "screens" but lack a standard way to extend the app without modifying core code; integration of third-party features requires custom wiring.
 - **Monorepo Bloat**: Framework code, UI components, app templates, and build tools entangled in single packages, forcing unnecessary dependencies.
 - **No Clear Upgrade Path**: Breaking changes to core packages ripple across all screens; adding new features requires updating multiple layers.
+- **No Usage or Performance Visibility**: Generated applications ship with no product analytics and no performance measurement. Teams cannot see where users abandon a form or which microfrontend is slow without hand-wiring a vendor SDK into every screen, and the agent guidelines forbid telemetry code outright, so AI-generated screens never include it.
 
 HAI3 solves these by enforcing a proven architectural model with four isolated layers: flat SDK packages (zero inter-dependencies), composable framework plugins, React adapters, and user-owned layout templates. The framework enforces event-driven Flux patterns and zero cross-layer dependencies, ensuring applications remain maintainable as they scale from single screens to complex multi-feature applications with microfrontend deployments.
 
@@ -78,6 +88,10 @@ HAI3 solves these by enforcing a proven architectural model with four isolated l
 | Bundle Size | 680KB (all features bundled, even unused) | <250KB dev, <180KB prod (tree-shaken per-feature) | 2026 Q3 |
 | Per-Screen Load Time | 1.2s (all screens pre-bundled, lazy-load only images) | <400ms (screens + translations lazy-loaded on-demand) | 2026 Q2 |
 | Screenset Onboarding | 8-10 hours (study uicore, copy demo, adapt) | 45 min (scaffold + modify single file) | 2026 Q2 |
+| Analytics Traffic by Default | Not applicable (no telemetry support) | 0 requests to any analytics host from an unconfigured generated app | Telemetry phase 1 |
+| Product Analytics in a Generated App | Not possible without custom wiring; forbidden to AI agents by guideline | Screen views and a form funnel visible in the analytics backend by following the install recipe alone | Telemetry phase 1 |
+| Instrumented Forms and Flows | 0% in the demo app and CLI templates | 100% in the demo app and CLI templates | Telemetry phase 1, enforced from phase 3 |
+| Per-MFE Performance Visibility | None (MFE load and mount are not timed) | Load and mount timing for every MFE in the demo app, attributed per extension, cold and warm loads separated | Telemetry phase 2 |
 
 ### 1.4 Glossary
 
@@ -96,6 +110,15 @@ HAI3 solves these by enforcing a proven architectural model with four isolated l
 | Registry | Self-registering singleton (ScreensetsRegistry, ThemeRegistry, I18nRegistry, ApiRegistry). Updated dynamically at runtime. |
 | GTS | Global Type System — schema-based validation for MFE shared properties and action chains. |
 | CDSL | Cypilot Domain-Specific Language for describing flows, algorithms, and states in FEATURE specs. |
+| Telemetry Event | Named, typed record of user behaviour or application state change (for example a form submitted), emitted through the telemetry API. Distinct from an EventBus event. |
+| Metric | Performance measurement with a name, a numeric value and a unit. Carries raw values only; rating is done in the analytics backend. |
+| Transport | Component that delivers events and metrics to one analytics backend. Several transports can be active; all are owned by the shell. |
+| Adapter | Optional package that implements a transport for a specific analytics backend (PostHog, Google Analytics 4). |
+| Flow | Multi-step user journey (wizard, checkout, multi-screen form) declared once with a stable identifier and ordered steps. A single-screen form is a one-step flow. |
+| Attempt | One run through a flow by one user, identified by an attempt identifier generated when the flow starts. |
+| Context Envelope | Fixed set of context fields (session, screen, MFE, versions, language, theme) attached to every event and metric by the shell. |
+| Consent Purpose | Category of telemetry (analytics or performance) that the end user can grant or deny independently. |
+| Tracking Plan | Machine-readable list of every telemetry event an application emits, with its properties. |
 
 ## 2. Actors
 
@@ -130,6 +153,13 @@ HAI3 solves these by enforcing a proven architectural model with four isolated l
 
 **Role**: Uses the built application — interacts with screens, navigates, switches themes/languages, triggers API calls, receives real-time updates.
 **Needs**: Responsive load times (<400ms per screen), accessible UI, locale-aware formatting.
+
+#### Product Analyst
+
+**ID**: `cpt-hai3-actor-product-analyst`
+
+**Role**: Product manager or analyst who consumes telemetry in the analytics backend: builds funnels and dashboards, compares releases, and reviews the tracking plan. Does not write application code.
+**Needs**: Consistent event names across screens, funnels computable from events without per-wizard setup, performance data attributed to a screen and a microfrontend, a readable list of every event the application emits.
 
 ### 2.2 System Actors
 
@@ -187,6 +217,18 @@ HAI3 solves these by enforcing a proven architectural model with four isolated l
 
 **Role**: Scaffolds new projects (`hai3 create`), generates layout and screenset code (`hai3 scaffold`), runs migrations (`hai3 migrate`), syncs AI tool configs (`hai3 ai sync`).
 
+#### AI Coding Agent
+
+**ID**: `cpt-hai3-actor-ai-agent`
+
+**Role**: AI assistant (Claude, Cursor, Windsurf, Copilot) that generates and modifies screens, screensets and MFEs by following the guidelines and commands synchronized by `hai3 ai sync`. Adds telemetry instrumentation to the code it generates and verifies it in the running application.
+
+#### Analytics Backend
+
+**ID**: `cpt-hai3-actor-analytics-backend`
+
+**Role**: External analytics or monitoring product (PostHog, Google Analytics 4, or a custom endpoint) that receives events and metrics from the shell through a transport. Integration is outbound only. Its JavaScript client instance is created and configured by the application; HAI3 never loads it. Availability, retention, rating of metrics and reporting are the backend's responsibility.
+
 ## 3. Operational Concept & Environment
 
 ### 3.1 Module-Specific Environment Constraints
@@ -199,10 +241,12 @@ packages/           -- Published @hai3/* packages
   screensets/       -- L1 SDK: MFE contracts, registry, Shadow DOM
   api/              -- L1 SDK: REST/SSE protocols, plugin system
   i18n/             -- L1 SDK: 36-language i18n, formatters
+  telemetry/        -- L1 SDK (planned): telemetry contracts, client, transport interface
   framework/        -- L2: Plugin architecture, layout slices
   react/            -- L3: HAI3Provider, hooks, MFE components
   studio/           -- Dev: Floating overlay with controls
   cli/              -- Tool: Scaffolding CLI
+  telemetry-*/      -- Optional (planned): analytics backend adapters, outside L1-L3
   docs/             -- VitePress documentation site
 internal/           -- Non-published internal tooling
 src/                -- Demo host application + MFE packages
@@ -230,6 +274,7 @@ src/                -- Demo host application + MFE packages
 - CLI tooling — Project scaffolding, screenset generation, migration runners, AI tool sync
 - MFE isolation — Blob URL per-runtime isolation, Shadow DOM CSS isolation
 - Architecture enforcement — Dependency-cruiser rules, Knip unused export detection
+- Telemetry — Typed event API and extendable catalog, automatic and helper-driven capture, funnels for forms and multi-step flows, shell and per-MFE performance metrics, consent and identity controls, pluggable transports with PostHog and Google Analytics 4 adapters, agent guidelines and verification tooling
 
 ### 4.2 Out of Scope
 
@@ -241,6 +286,18 @@ src/                -- Demo host application + MFE packages
 - Layout rendering components — Generated by CLI into user's project, not in any @hai3 package
 - WebSocket protocol — Only REST and SSE implemented
 - Database schemas — N/A (client-side library)
+- Analytics reporting — Dashboards, funnel definitions inside the backend, rating of metrics as good or poor, alerting, data retention, deletion and export are the analytics backend's job
+- Error monitoring, session replay, heatmaps, feature flags and experiments — Separate products; they can be attached through a custom transport or the application's own backend client but are not provided
+- DOM-level autocapture — Telemetry captures declared semantic events only; vendor autocapture remains the application's choice
+- Consent interface and legal basis — The application owns the consent banner, the persistence of the choice, and the decision which purposes need consent in which jurisdiction
+- Form, wizard and stepper components — Telemetry attaches to whatever the project uses; no wizard implementation and no shared UI kit package is provided
+- Flows spanning more than one MFE — Each MFE has isolated state; a journey crossing MFEs reports as separate flows
+- Content Security Policy automation — Required directives are documented, not generated
+- Offline queueing and browser storage for telemetry — No telemetry data or identifier is written to cookies, local storage or session storage
+- Delivery layer for vendor backends — Batching, retry and offline handling belong to the backend client or the custom transport
+- Server-side telemetry, build-time performance budgets and CI performance gates
+- Automatic migration of existing forms — Existing projects are brought into compliance through an agent command, not a code rewrite
+- Collection of data about HAI3 users by HAI3 tooling — The CLI, Studio and packages report nothing to the HAI3 authors
 
 ## 5. Functional Requirements
 
@@ -876,6 +933,456 @@ The system MUST provide a `microfrontends()` framework plugin with actions (`loa
 **Rationale**: Core orchestration plugin that integrates MFE lifecycle management, theme/i18n propagation, and shared property bridging into the framework's plugin chain.
 **Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-framework-plugin`
 
+### 5.19 Telemetry: Event API and Catalog
+
+#### Typed Telemetry API
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-event-api`
+
+The system MUST provide a typed telemetry API through which screens, screensets and MFEs emit named events with typed properties. The telemetry API MUST be separate from the EventBus: telemetry events MUST NOT be derived automatically from EventBus traffic, and emitting a telemetry event MUST NOT emit an EventBus event.
+
+**Rationale**: EventBus events describe application intent and carry domain payloads that may contain personal data. Analytics needs a deliberate, stable vocabulary of user behaviour.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`
+
+#### Event Naming Convention
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-event-naming`
+
+Telemetry event names MUST follow the form `area/object/action`, in lowercase, with the action in the past tense. Framework-defined events MUST use a reserved prefix that application code cannot use. Application-defined events MUST use the identifier of the owning screenset or MFE as their first segment. The system MUST define a fixed list of verbs for common actions.
+
+**Rationale**: Event names cannot be changed later without breaking dashboards and funnels. One convention, matching existing event naming, is learnable by developers and agents and checkable by tooling.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-product-analyst`
+
+#### Catalog Extension
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-catalog-extension`
+
+Applications, screensets and MFEs MUST be able to add their own events by declaring the event name and its property types. Emitting an undeclared event, or a property of the wrong type, MUST be a compile-time error. Framework-defined events MUST NOT be modifiable by applications. Event properties MUST be limited to bounded types (identifiers, numbers, booleans, enumerated values); a free-form string property MUST require an explicit, reviewable exception.
+
+**Rationale**: The tracked-event list must be extendable without losing type safety, and bounded property types keep user-typed content out of analytics.
+**Actors**: `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`
+
+#### Context Envelope
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-context-envelope`
+
+The system MUST attach a fixed context to every event and metric, set by the shell and not by the caller: timestamp, sequence number, session identifier, screen and screenset identifiers, MFE and extension identifiers where applicable, application and framework versions, language, theme, and viewport class. Tenant identifier, user identifier and application-defined context MUST be opt-in per application. The system MUST NOT attach the full URL, referrer, user agent, IP address or screen dimensions. Callers MUST NOT be able to override context fields.
+
+**Rationale**: An event is only useful when its screen, microfrontend and version are known and trustworthy. Context supplied by callers would be inconsistent and could not be relied on for attribution.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-product-analyst`
+
+#### Built-in Event Controls
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-builtin-controls`
+
+Each group of framework-defined events MUST be individually switchable per application through telemetry configuration. A group that is switched off MUST NOT be captured at all. The shape of a framework-defined event MUST NOT be redefinable by the application.
+
+**Rationale**: The default catalog is deliberately comprehensive; applications need to reduce volume without forking the catalog.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-host-app`
+
+### 5.20 Telemetry: Capture
+
+#### Automatic Capture
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-auto-capture`
+
+The system MUST emit the following events without any code in screens: application started; session started and session ended; screen viewed and screen left with the time spent on the screen; UI render error and unhandled error or rejection; theme changed and language changed.
+
+**Rationale**: Screen-level analytics and error visibility must work in every generated application with no authoring effort.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-framework-plugin`, `cpt-hai3-actor-end-user`
+
+#### MFE Lifecycle Events
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-mfe-lifecycle-events`
+
+The system MUST emit extension loaded, extension mounted, extension unmounted, and extension load or mount failed for every extension, without any code in the MFE.
+
+**Rationale**: Extension availability and failures are part of the default catalog and must not depend on the MFE author.
+**Actors**: `cpt-hai3-actor-microfrontend`, `cpt-hai3-actor-host-app`
+
+#### API Failure Events
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-api-failure-events`
+
+The system MUST emit an event for each failed API request, carrying the service, the status class and the duration.
+
+**Rationale**: Failed requests explain abandoned forms and flows; they belong in the same stream as the behaviour they affect.
+**Actors**: `cpt-hai3-actor-api-protocol`, `cpt-hai3-actor-product-analyst`
+
+#### Form Capture
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-form-capture`
+
+The system MUST provide a UI-independent means to instrument a form with a single binding that emits: form started on first interaction, validation failed, submitted, submit succeeded, submit failed, and abandoned. A validation-failed event MUST carry only the form identifier, the field name and an error code, and MUST NOT carry the error message or the field value. The means MUST work with any markup and any form library. The blank MFE template MUST include a ready-made binding for the form library used by the templates, owned by the project like the template's other UI code.
+
+**Rationale**: Forms are where users drop off. One binding per form is reliable for agents and developers; several separate calls are not.
+**Actors**: `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-end-user`
+
+#### Primary Action Capture
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-action-capture`
+
+The system MUST allow primary and destructive actions to emit an event identified by a stable, developer-assigned action identifier. The visible label MUST NOT be used as the identifier.
+
+**Rationale**: Key actions must remain comparable across copy changes and translations.
+**Actors**: `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`
+
+#### Component Interaction Capture
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-component-capture`
+
+The system MUST provide a UI-independent means to emit: search performed with the query length only, filter or sort applied, and page changed for lists; dialog opened and dialog closed; tab switched. These MUST work through the project's own UI components and MUST NOT require a shared UI component package.
+
+**Rationale**: Completes the default interaction catalog while respecting that UI components are owned by each project.
+**Actors**: `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`
+
+#### No DOM Autocapture
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-no-dom-autocapture`
+
+The system MUST NOT capture clicks, inputs, scrolling, hovering or keystrokes by listening at the DOM level. Autocapture configured by the application on its own backend client MUST remain possible; it operates under the backend's rules and outside the data rules of this document.
+
+**Rationale**: DOM-level capture is the main way personal data reaches analytics, and it does not work reliably across MFE Shadow DOM boundaries.
+**Actors**: `cpt-hai3-actor-end-user`, `cpt-hai3-actor-developer`
+
+### 5.21 Telemetry: Funnels
+
+#### Flow Declaration
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-flow-declaration`
+
+The system MUST allow a multi-step flow to be declared once, with a stable flow identifier and an ordered list of step identifiers. A single-screen form MUST be treated as a one-step flow. The system MUST only observe a flow; step navigation and wizard UI remain the project's own.
+
+**Rationale**: A declared flow gives every step event the same vocabulary, so funnels are consistent across wizards built in different ways.
+**Actors**: `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`
+
+#### Flow Events
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-flow-events`
+
+For a declared flow the system MUST emit: flow started, step viewed, step completed, step went back, flow completed and flow abandoned. Each flow event MUST carry the flow identifier, the step identifier, the step position, the total number of steps, and an attempt identifier generated when the flow starts. Step completed and flow abandoned MUST carry the time spent on the step. The system MUST emit flow abandoned itself when a flow ends without completion, including when the page is hidden. Steps MAY be skipped or visited out of order.
+
+**Rationale**: A funnel is computable in an analytics backend only when step events share an attempt identifier and an order. Abandonment emitted by the framework cannot be forgotten by a screen author.
+**Actors**: `cpt-hai3-actor-product-analyst`, `cpt-hai3-actor-end-user`
+
+### 5.22 Telemetry: MFE Channel
+
+#### MFE Event Forwarding
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-mfe-forwarding`
+
+Events emitted inside an MFE MUST reach the shell's telemetry through the existing host-MFE communication contract (actions chains from MFE to host, shared properties from host to MFE). An MFE MUST NOT load, reference or configure an analytics backend client. The shell MUST provide the telemetry context an MFE needs (consent state, session, sampling) to every mounted MFE.
+
+**Rationale**: Screens live in MFEs and MFEs are isolated from the shell. Using the existing contract keeps one transport in the shell without weakening isolation.
+**Actors**: `cpt-hai3-actor-microfrontend`, `cpt-hai3-actor-host-app`
+
+#### MFE Attribution
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-mfe-attribution`
+
+The shell MUST stamp the MFE and extension identity on every forwarded event and metric. Identity values supplied by the MFE MUST be discarded.
+
+**Rationale**: Per-MFE analytics and performance data are only trustworthy when an MFE cannot mislabel its own signals.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-product-analyst`
+
+#### Forwarded Event Validation
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-mfe-validation`
+
+The shell MUST treat telemetry forwarded by an MFE as untrusted. It MUST reject an event whose name does not start with the forwarding MFE's identifier or whose properties violate the data rules. An MFE MUST NOT be able to emit framework-reserved events or metrics, identify or reset the user, or change consent. Rejected events MUST be counted and reported to the developer in development builds.
+
+**Rationale**: MFEs may come from other teams or suppliers; everything they forward lands in the shell owner's analytics account under the shell owner's consent.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-microfrontend`
+
+#### MFE Limits and Controls
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-mfe-limits`
+
+The shell MUST enforce a configurable payload size limit and rate limit per extension, count what it drops, and report the count as a metric. Shell configuration MUST allow telemetry to be disabled for a specific extension or restricted to the performance purpose. The MFE side MUST group events emitted close together into a single forwarding call while preserving their emission time and order, and MUST forward pending events before the MFE is unmounted.
+
+**Rationale**: A faulty or third-party MFE must not exhaust the analytics quota, and abandonment events emitted at unmount must not be lost.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-microfrontend`
+
+### 5.23 Telemetry: Performance Metrics
+
+#### Metric Signal
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-metric-signal`
+
+The system MUST represent performance measurements as metrics, a signal type distinct from events, consisting of a name, a numeric value, a unit and the context envelope. Metrics MUST carry raw values only; the system MUST NOT rate metrics or define thresholds for them. Metrics MUST be delivered through the same transports as events, and a transport MUST be able to decline metrics. HAI3-specific timings MUST also be published on the browser's standard performance timeline.
+
+**Rationale**: Events are counted and sequenced; metrics are aggregated. Keeping them distinct keeps funnels clean. Rating is derived in the analytics backend from historical medians.
+**Actors**: `cpt-hai3-actor-product-analyst`, `cpt-hai3-actor-analytics-backend`
+
+#### Shell Metrics
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-shell-metrics`
+
+The system MUST collect for the shell: Largest Contentful Paint, Interaction to Next Paint, Cumulative Layout Shift, First Contentful Paint and Time to First Byte; shell ready time; first screen ready time; screen transition time for in-app navigation; and the count and total duration of long tasks per screen.
+
+**Rationale**: Standard page metrics are comparable with public benchmarks; the HAI3-specific timings cover what standard tools cannot see in a shell with in-app navigation.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-product-analyst`, `cpt-hai3-actor-end-user`
+
+#### MFE Metrics
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-mfe-metrics`
+
+The system MUST collect per extension: load duration, mount duration, time to content when the MFE reports it, transfer size when the browser exposes it, whether the load was cold or warm, and unmount duration. These MUST be measured by the shell and attributed to the extension, its MFE package, its domain and the active screen. Page-level metrics MUST be tagged with the active screen and, where the browser identifies the responsible element, with the owning extension.
+
+**Rationale**: In a shell composed of MFEs from several teams, performance is only actionable when it is attributed to a specific MFE. Load and mount timings are exact; per-MFE attribution of page-level metrics is indicative.
+**Actors**: `cpt-hai3-actor-microfrontend`, `cpt-hai3-actor-product-analyst`
+
+#### API Timing
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-api-timing`
+
+The system MUST report a metric per API request carrying the duration, the service, the method, the status class and a route template. It MUST NOT include the concrete URL, query string, request or response body, or header values. Where no route template is available the service name alone MUST be used. Streaming connections MUST report time to first message and connection duration.
+
+**Rationale**: API latency is the most common cause of slow screens; route templates keep identifiers out of metrics.
+**Actors**: `cpt-hai3-actor-api-protocol`, `cpt-hai3-actor-product-analyst`
+
+#### Metric Sampling
+
+- [ ] `p2` - **ID**: `cpt-hai3-fr-telemetry-metric-sampling`
+
+The system MUST support a per-session sampling rate for metrics. The production rate MUST be an explicit choice by the application; there MUST be no implicit production default. Events MUST NOT be sampled by default. Failure signals MUST be sent regardless of sampling, and requests slower than a configurable threshold MUST be reported regardless of sampling.
+
+**Rationale**: Analytics backends bill or cap by volume; sampling whole sessions keeps a session's metrics complete and correlated, and sampling events would break funnels.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-analytics-backend`
+
+### 5.24 Telemetry: Transports and Adapters
+
+#### Transport Contract
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-transport-contract`
+
+The system MUST deliver events and metrics to analytics backends only through transports that implement a published contract covering: receiving an event, receiving a metric, identifying and resetting the user, reacting to a consent change, flushing, and shutting down. The system MUST support several transports at once, all fed by a single shell-owned dispatcher. Application authors MUST be able to implement a custom transport without changes to HAI3.
+
+**Rationale**: Any backend must be installable, and one dispatcher in the shell gives a single place for consent, ordering and failure handling.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-host-app`, `cpt-hai3-actor-analytics-backend`
+
+#### Application-Owned Backend Client
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-app-owned-client`
+
+The analytics backend's JavaScript client instance MUST be created and configured by the application and passed to the adapter. HAI3 MUST NOT load, bundle or configure a backend client, and MUST NOT restrict any feature of it.
+
+**Rationale**: Vendor features (session replay, feature flags, surveys and future additions) keep working untouched, and HAI3 does not have to track vendor options.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-analytics-backend`
+
+#### No Egress by Default
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-no-default-egress`
+
+A generated application MUST NOT send telemetry anywhere until the application installs a transport. Capture MUST remain active without a transport so that events can be inspected locally.
+
+**Rationale**: Every generated project would otherwise be a tracking deployment before anyone has decided on consent.
+**Actors**: `cpt-hai3-actor-end-user`, `cpt-hai3-actor-developer`
+
+#### Development Visibility
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-dev-visibility`
+
+In development builds the system MUST make every event and metric visible locally and MUST expose the recent events and metrics programmatically, so that tests and AI agents can assert on them. This capability MUST be absent from production builds.
+
+**Rationale**: With no egress by default, instrumentation that cannot be observed locally would break without anyone noticing.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-ai-agent`
+
+#### Delivery Lifecycle
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-delivery-lifecycle`
+
+The system MUST pass signals to each transport in the order they were emitted, MUST signal transports to flush when the page is hidden, and MUST signal them to shut down when the application is destroyed. The system MUST NOT implement batching, retry or offline storage for backend delivery; these belong to the backend client or the custom transport.
+
+**Rationale**: Backend clients already batch, retry and flush; a second queue in front of them would duplicate their work and risk double delivery.
+**Actors**: `cpt-hai3-actor-host-app`, `cpt-hai3-actor-analytics-backend`
+
+#### PostHog Adapter
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-posthog-adapter`
+
+The system MUST provide an optional adapter that delivers events, metrics, identity and consent to an application-owned PostHog client, and reports screen views in the form PostHog's web analytics expects. The adapter documentation MUST state which PostHog automatic features overlap with HAI3 capture. The mapping details are to be confirmed against PostHog's documentation at design time.
+
+**Rationale**: PostHog is a named target backend and the reference for the end-to-end demonstration.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-analytics-backend`
+
+#### Google Analytics 4 Adapter
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-ga4-adapter`
+
+The system MUST provide an optional adapter that delivers events, metrics, identity and consent to an application-provided Google Analytics 4 client, converting event names to the form GA4 permits. The adapter MUST grant analytics consent only and MUST NOT enable advertising features. Event names and parameters that exceed GA4's limits MUST be reported when the project is validated and MUST NOT be truncated silently. GA4's limits are to be confirmed against Google's documentation at design time.
+
+**Rationale**: Google Analytics is a named target backend; its restrictions must surface in development and not as missing data in production.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-analytics-backend`
+
+#### Custom Mappers
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-custom-mappers`
+
+Adapters MUST allow the application to register its own mapping for an event or a metric, selected by name or name pattern, that replaces or extends the adapter's default mapping.
+
+**Rationale**: Default mappings cannot anticipate every reporting need or vendor change; applications must not have to fork an adapter.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-product-analyst`
+
+#### Install Recipe
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-install-recipe`
+
+The documentation MUST include a recipe for installing an analytics backend (install the backend client and the adapter, create the client in the shell, register the transport, set consent, update the Content Security Policy) and a worked example of a custom transport. Generated project templates MUST NOT include any backend client or adapter.
+
+**Rationale**: Installing a backend must be a short, repeatable procedure, and new projects must stay vendor-free.
+**Actors**: `cpt-hai3-actor-developer`
+
+#### Install Command
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-install-command`
+
+The system MUST provide an AI agent command that follows the install recipe, stops for explicit human approval before adding dependencies, and runs telemetry validation afterwards.
+
+**Rationale**: Adding a dependency is a stop condition for agents; the command makes the approval explicit and the result checked.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-developer`
+
+### 5.25 Telemetry: Consent and Identity
+
+#### Consent Gate
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-consent-gate`
+
+The system MUST gate delivery by two consent purposes, analytics and performance, each of which is unknown, granted or denied. Unknown MUST be treated as denied unless the application configures otherwise. A transport MUST receive a signal only when that signal's purpose is granted. Signals captured while consent is unknown MUST be held in a bounded in-memory buffer, delivered on grant, and discarded on denial or when the page closes; the application MUST be able to turn this buffering off. Consent changes MUST take effect immediately and MUST be forwarded by adapters to the backend client. MFEs MUST receive the consent state and MUST NOT be able to change it. The system MUST NOT render a consent interface or persist the consent choice.
+
+**Rationale**: Performance monitoring and product analytics have different legal footing in many jurisdictions; the application must be able to honour either choice without bypassing HAI3.
+**Actors**: `cpt-hai3-actor-end-user`, `cpt-hai3-actor-developer`, `cpt-hai3-actor-host-app`
+
+#### Identity
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-identity`
+
+The system MUST create only in-memory identifiers (a session identifier per page load, flow attempt identifiers, sequence numbers) and MUST NOT write any identifier to cookies, local storage or session storage. A user MUST be identified only by an explicit application call supplying an opaque identifier and a bounded set of traits, and identity MUST be cleared by an explicit reset. A tenant change MUST reset identity by default. MFEs MUST NOT be able to identify or reset the user.
+
+**Rationale**: Creating a persistent identifier is itself regulated; durable identity stays with the backend client under the consent the application collected.
+**Actors**: `cpt-hai3-actor-end-user`, `cpt-hai3-actor-developer`
+
+#### Data Rules
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-data-rules`
+
+The system MUST enforce: a list of forbidden property names that projects can extend but not shorten; a maximum length for any permitted string value; and the exclusion of user-typed content (field values, search text, comments, file names, validation messages) from event properties. Error events MUST carry only the error type and its location by default; including the error message MUST be an explicit per-application choice.
+
+**Rationale**: Typed, bounded properties remove the common, mechanical ways personal data leaks into analytics. Error messages routinely contain user data.
+**Actors**: `cpt-hai3-actor-end-user`, `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-ai-agent`
+
+### 5.26 Telemetry: Agent Harness
+
+#### Guideline Policy
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-guideline-policy`
+
+The agent guidelines MUST replace the prohibition of telemetry code with the rule that telemetry through the HAI3 telemetry API is required and that direct calls to an analytics backend client, and any tracking outside the telemetry API, are prohibited. The guidelines MUST include a telemetry target, routed from the main guideline file and synchronized to all supported AI tools by `hai3 ai sync`. The guideline change MUST ship in the same release as the telemetry API.
+
+**Rationale**: Agents following the current guidelines refuse or remove telemetry. Deleting the rule without a replacement would let agents call vendor SDKs directly from screens.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-cli`
+
+#### Authoring Rule
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-authoring-rule`
+
+The guidelines MUST state what an agent adds for each construct it generates: nothing for a screen; one binding for a form; one declaration and one step binding per step for a multi-step flow; one event with a stable action identifier for a primary or destructive action; one custom event for each application-specific business outcome. The generation commands and the project and MFE templates MUST produce instrumented code. Every form and flow in the demo application and the CLI templates MUST be instrumented.
+
+**Rationale**: A rule that maps constructs to instrumentation is applied the same way on every run; the templates are what agents copy from.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-screenset-author`, `cpt-hai3-actor-cli`
+
+#### Telemetry Lint Rules
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-lint-rules`
+
+Generated projects MUST include lint rules that reject: importing an analytics backend client anywhere except the shell's transport setup; an event name that is malformed, uses the reserved prefix, or is not namespaced by its owner; an event name built at runtime; and a custom event declared with an unbounded property or a reserved context name. Lint rules MUST be deterministic; checks that require judging what counts as a form or a primary action MUST NOT be lint rules.
+
+**Rationale**: Projects lint with zero warnings allowed and no inline suppression, so only checks that cannot produce false positives may block work.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-developer`, `cpt-hai3-actor-ci-cd`
+
+#### Agent Behaviour Tests
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-prompt-tests`
+
+The HAI3 agent-behaviour test suite MUST include cases that verify the generation commands produce telemetry instrumentation for forms and flows.
+
+**Rationale**: Guards the guidelines themselves; a later edit that weakens the telemetry rules is caught in HAI3's own checks.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-ci-cd`
+
+#### Security Guidance
+
+- [ ] `p1` - **ID**: `cpt-hai3-fr-telemetry-security-guidance`
+
+The security documentation MUST include a telemetry section that covers: bundling the backend client with the application instead of loading it from a remote script; limiting the connection directive of the Content Security Policy to the backend's ingestion endpoint; a first-party proxy as the preferred production setup; and, per adapter, the required origins with a reference to the vendor's current guidance. It MUST state that MFEs need no Content Security Policy additions for telemetry, that HAI3 stores no identifiers in the browser, and that nothing leaves the browser by default. The system MUST NOT generate or modify a Content Security Policy automatically.
+
+**Rationale**: Under the current published policy guidance every request to an analytics host is blocked; a team following it would get silent failure.
+**Actors**: `cpt-hai3-actor-developer`
+
+### 5.27 Telemetry: Verification
+
+#### Telemetry Validation Command
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-validate-command`
+
+The CLI MUST provide a command that inventories forms, flows, lists and primary actions in screensets and MFE packages, reports each uninstrumented one with its file and line, prints a summary per screenset, lists the files it could not analyse, and exits with a failure status when required instrumentation is missing in a project under enforcement. The command MUST be able to output the tracking plan in machine-readable form. It MUST run as part of the project's architecture check and of the agent pre-change checklist.
+
+**Rationale**: Lint can reject wrong telemetry but cannot notice absent telemetry; this is the check behind the requirement that agents always instrument what they generate.
+**Actors**: `cpt-hai3-actor-cli`, `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-ci-cd`
+
+#### Construct Recognition
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-construct-recognition`
+
+The validation command MUST recognise with certainty: form elements and form-library instances, and the components a project has registered in its telemetry configuration as its form, stepper, table, dialog and button components. Wizards built by a project without registered components MUST be detected by signals in the code and reported as suspected flows; under enforcement a suspected flow MUST fail validation until it is instrumented or explicitly marked as not a flow with a reason. The guidelines MUST instruct agents to identify multi-step journeys when generating, reviewing and instrumenting code. New projects MUST have the component registration pre-filled for the blank MFE template.
+
+**Rationale**: HAI3 provides no wizard implementation and no shared UI kit, so project-built wizards have no fixed shape. Certain, suspected and agent-judged detection together keep them from going uncovered.
+**Actors**: `cpt-hai3-actor-cli`, `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-screenset-author`
+
+#### Coverage and Exemptions
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-coverage`
+
+Telemetry coverage MUST be counted per construct type for each screenset and MFE package, with a required level of 100% of recognised constructs. A construct MUST be exemptible through an explicit option with a mandatory reason, and whole directories MUST be exemptible in project configuration. Exemptions MUST be listed in the validation report, and an exemption without a reason MUST fail validation. The report MUST state that coverage does not measure application-specific business events.
+
+**Rationale**: A percentage target below 100 lets gaps accumulate where nobody looks; visible, reasoned exemptions keep the number honest.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-ai-agent`
+
+#### Report and Enforcement Modes
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-enforcement-modes`
+
+Updating an existing project MUST NOT break its build: after an update the validation command MUST report coverage without failing. Enforcement MUST be switched on per project through project configuration. New projects MUST be created with enforcement on. The system MUST NOT rewrite existing forms automatically.
+
+**Rationale**: A project with many existing forms would otherwise fail on the day it updates, and teams would stop updating.
+**Actors**: `cpt-hai3-actor-developer`, `cpt-hai3-actor-cli`
+
+#### Catch-up Command
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-catchup-command`
+
+The system MUST provide an AI agent command that instruments an existing screenset: it runs the validation report, adds the missing instrumentation and tests, and re-runs the report.
+
+**Rationale**: Bringing an existing project into compliance becomes something a team can request one screenset at a time.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-developer`
+
+#### Generated Telemetry Tests
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-generated-tests`
+
+When an agent generates a form or a flow it MUST also generate a test that asserts the emitted events. The agent's verification of the running application MUST include confirming that the expected events were emitted.
+
+**Rationale**: Instrumentation can be present and still not fire; a test keeps it working after later refactoring.
+**Actors**: `cpt-hai3-actor-ai-agent`
+
+#### Telemetry Review Checklist
+
+- [ ] `p3` - **ID**: `cpt-hai3-fr-telemetry-review-checklist`
+
+The review command MUST include a telemetry checklist that: lists new and changed custom events with their properties; assesses whether each identifier property identifies a person; requires a justification for each free-form string exception and each coverage exemption; flags changes to the shell's telemetry configuration; and includes the difference in the tracking plan with renamed and removed events highlighted. Judgements about personal data MUST be flagged for human confirmation and MUST NOT be approved by the agent alone.
+
+**Rationale**: Tools can check that a property is typed; only a reviewer can judge whether an identifier is personal data or whether an event should exist.
+**Actors**: `cpt-hai3-actor-ai-agent`, `cpt-hai3-actor-developer`, `cpt-hai3-actor-product-analyst`
+
 ## 6. Non-Functional Requirements
 
 ### 6.1 NFR Inclusions
@@ -1033,11 +1540,76 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 **Threshold**: All architecture checks pass in CI.
 **Rationale**: Prevents architectural drift over time.
 
+#### Telemetry Zero Egress by Default
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-zero-egress`
+
+A freshly generated application with no transport installed MUST make no network request to any analytics host.
+
+**Threshold**: 0 requests to origins other than the application's own that are attributable to telemetry, observed over application start, navigation and a form submission.
+**Rationale**: Privacy by default; tracking starts only as a deliberate act of the application owner.
+**Verification Method**: Inspection of network traffic of a generated project.
+
+#### Telemetry Privacy by Default
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-privacy-default`
+
+Framework-defined events MUST carry no personal data, and the system MUST store no identifier in the browser.
+
+**Threshold**: 0 framework-defined event properties outside the bounded property types; 0 telemetry writes to cookies, local storage or session storage.
+**Rationale**: Keeps the framework itself outside personal-data processing while a comprehensive default catalog is captured.
+**Verification Method**: Inspection of an audited list of every framework-defined event and its properties.
+
+#### Telemetry Non-Blocking Emission
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-non-blocking`
+
+Emitting an event or metric MUST NOT throw, MUST NOT return anything application code can wait on, and MUST NOT delay the interaction that triggered it. The internal queue MUST be bounded, with dropped signals counted.
+
+**Threshold**: 0 exceptions propagated from emission; on the demo application, Interaction to Next Paint and screen transition time with telemetry enabled differ from the values with telemetry disabled by no more than run-to-run variation. The queue limit is set during design from measurement.
+**Rationale**: Telemetry sits on click handlers, submits and navigation; it must not degrade the numbers it reports or change application behaviour.
+
+#### Telemetry No Cost When Unused
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-no-cost-unused`
+
+An application that does not enable telemetry MUST NOT pay for it in bundle size or runtime work. Backend clients and the page-metrics library MUST NOT be part of the bundle unless the application enables them.
+
+**Threshold**: The threshold of `cpt-hai3-nfr-perf-treeshake` (production bundle < 180KB for a minimal app) still passes without the telemetry plugin; 0 telemetry observers or timers are active when the plugin is absent.
+**Rationale**: Telemetry is optional; existing bundle-size commitments must hold.
+
+#### Telemetry Failure Isolation
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-failure-isolation`
+
+A transport that throws, stalls or is blocked by the browser MUST NOT affect the application or other transports.
+
+**Threshold**: 0 application errors and 0 signals lost by other transports when one transport fails on every call.
+**Rationale**: Analytics hosts are commonly blocked by ad blockers; that must never break the product.
+
+#### Telemetry MFE Independence
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-mfe-independence`
+
+An instrumented MFE MUST work unchanged in a shell that has no telemetry and when run standalone.
+
+**Threshold**: 0 errors and no behavioural difference when an instrumented MFE is mounted in a shell without the telemetry plugin.
+**Rationale**: MFEs are deployed independently of shells; instrumentation must not create a hard dependency on the shell's configuration.
+
+#### Telemetry Layering
+
+- [ ] `p1` - **ID**: `cpt-hai3-nfr-telemetry-layering`
+
+Existing SDK packages MUST remain unaware of telemetry, the telemetry SDK package MUST comply with `cpt-hai3-nfr-maint-zero-crossdeps`, and no core package MUST depend on an adapter.
+
+**Threshold**: 0 imports of the telemetry package from `@hai3/state`, `@hai3/screensets`, `@hai3/api` or `@hai3/i18n`; 0 imports of an adapter package from any L1-L3 package; `npm run arch:check` passes.
+**Rationale**: Telemetry must fit the layered architecture, not sit beside it.
+
 ### 6.2 NFR Exclusions
 
 - **Accessibility** (UX-PRD-002): Not applicable at framework level — accessibility is the responsibility of application/screenset UI components and application-level code. Local UI may use Radix UI primitives for accessibility foundations.
 - **Safety** (SAFE-PRD-001/002): Not applicable — HAI3 is a client-side UI framework with no physical interaction, medical, or vehicle control capabilities.
-- **Regulatory Compliance** (COMPL-PRD-001/002/003): Not applicable — HAI3 does not process PII, financial data, or healthcare data. Applications built with HAI3 may have compliance requirements, but those are application-level concerns.
+- **Regulatory Compliance** (COMPL-PRD-001/002/003): Not applicable at framework level — HAI3 does not process PII, financial data, or healthcare data on its own. Telemetry sends nothing by default and carries no personal data by contract (`cpt-hai3-nfr-telemetry-zero-egress`, `cpt-hai3-nfr-telemetry-privacy-default`); a user identifier reaches an analytics backend only when the application explicitly supplies one (`cpt-hai3-fr-telemetry-identity`). Applications that install a transport and identify users take on the resulting compliance obligations, including the consent interface and the legal basis; HAI3 provides the consent gate (`cpt-hai3-fr-telemetry-consent-gate`) but not the compliance process.
 - **Internationalization** (UX-PRD-003): Addressed as functional requirement `cpt-hai3-fr-sdk-i18n-package` — HAI3 provides the i18n infrastructure; application-level translation content is out of scope.
 - **Offline Capability** (UX-PRD-004): Not applicable — HAI3 is designed for always-connected SPA environments.
 - **Availability/Recovery** (REL-PRD-001/002): Not applicable — HAI3 is a client-side library, not a hosted service. Availability and recovery are deployment-level concerns.
@@ -1118,6 +1690,33 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 **Description**: Project scaffolding, code generation, migration runners, AI tool configuration sync.
 **Breaking Change Policy**: Major version bump required.
 
+#### @hai3/telemetry
+
+- [ ] `p1` - **ID**: `cpt-hai3-interface-telemetry`
+
+**Type**: TypeScript ES module
+**Stability**: experimental
+**Description**: Telemetry contracts: the typed event catalog and its extension mechanism, the client used to emit events and metrics, and the transport contract. Package name is a working name to be confirmed at design. The telemetry plugin in `@hai3/framework`, the instrumentation means in `@hai3/react` and the validation command in `@hai3/cli` are additions to those existing interfaces, specified by the requirements in 5.19-5.27.
+**Breaking Change Policy**: Minor version may include breaking changes during experimental phase.
+
+#### @hai3/telemetry-posthog
+
+- [ ] `p1` - **ID**: `cpt-hai3-interface-telemetry-posthog`
+
+**Type**: TypeScript ES module
+**Stability**: experimental
+**Description**: Optional adapter implementing the transport contract for an application-owned PostHog client. Versioned independently of the core packages. Package name is a working name to be confirmed at design.
+**Breaking Change Policy**: Minor version may include breaking changes during experimental phase.
+
+#### @hai3/telemetry-ga4
+
+- [ ] `p3` - **ID**: `cpt-hai3-interface-telemetry-ga4`
+
+**Type**: TypeScript ES module
+**Stability**: experimental
+**Description**: Optional adapter implementing the transport contract for an application-provided Google Analytics 4 client. Versioned independently of the core packages. Package name is a working name to be confirmed at design.
+**Breaking Change Policy**: Minor version may include breaking changes during experimental phase.
+
 ### 7.2 External Integration Contracts
 
 #### MFE Manifest Contract
@@ -1137,6 +1736,24 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 **Protocol/Format**: `@originjs/vite-plugin-federation` runtime
 **Compatibility**: Compatible with vite-plugin-federation v1.4.x.
 **Description**: Federation runtime's `importShared()` resolves from `globalThis.__federation_shared__`.
+
+#### Telemetry Transport Contract
+
+- [ ] `p1` - **ID**: `cpt-hai3-contract-telemetry-transport`
+
+**Direction**: provided by library; implemented by adapters and by application-defined transports
+**Protocol/Format**: TypeScript interface
+**Compatibility**: Additive changes only within a minor version once stable; experimental until then.
+**Description**: What a transport must do to receive events and metrics, identity and consent changes, and flush and shutdown signals from the shell's dispatcher.
+
+#### Analytics Backend Client
+
+- [ ] `p1` - **ID**: `cpt-hai3-contract-telemetry-backend-client`
+
+**Direction**: required from application
+**Protocol/Format**: The analytics vendor's JavaScript client instance, created and configured by the application
+**Compatibility**: Each adapter declares the range of backend client versions it supports.
+**Description**: The application supplies a working backend client to the adapter. HAI3 does not load, bundle or configure it.
 
 ## 8. Use Cases
 
@@ -1189,6 +1806,148 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 **Alternative Flows**:
 - **Directory exists**: CLI prompts for `--force` flag to overwrite
 
+#### Instrument a Generated Form
+
+- [ ] `p1` - **ID**: `cpt-hai3-usecase-telemetry-instrument-form`
+
+**Actor**: `cpt-hai3-actor-ai-agent`
+
+**Preconditions**:
+- Project has telemetry enabled in the shell; no transport is required
+- Agent guidelines with the telemetry target are synchronized
+
+**Main Flow**:
+1. Developer asks the agent to add a screen containing a form
+2. Agent generates the screen and binds the form to telemetry with a stable form identifier
+3. Agent opens the running application, triggers a validation error and submits the form
+4. Agent reads the locally visible events and confirms started, validation failed, submitted and succeeded were emitted in order
+
+**Postconditions**:
+- The form emits its events with no vendor-specific code in the screen
+- Lint and architecture checks pass
+
+**Alternative Flows**:
+- **Expected event missing**: Agent corrects the binding and repeats the verification before finishing
+- **Agent imports an analytics backend client in the screen**: Lint rejects the change
+
+#### Build a Funnel for a Multi-Step Flow
+
+- [ ] `p1` - **ID**: `cpt-hai3-usecase-telemetry-define-funnel`
+
+**Actor**: `cpt-hai3-actor-product-analyst`
+
+**Preconditions**:
+- A screenset contains a multi-step flow declared with a flow identifier and ordered steps
+- A transport is installed and analytics consent is granted
+
+**Main Flow**:
+1. End users go through the flow; some complete it, some leave part-way
+2. The system emits step events carrying the flow, step, position and attempt identifiers, and emits abandonment when a user leaves
+3. Product Analyst selects the flow's step events in the analytics backend and builds a funnel
+4. Product Analyst reads drop-off and time spent per step
+
+**Postconditions**:
+- Drop-off per step is visible without per-flow setup in code or in the backend beyond selecting the steps
+
+**Alternative Flows**:
+- **User reloads the page mid-flow**: The attempt is reported as abandoned and a new attempt starts
+- **Flow crosses into another MFE**: The part in each MFE is reported as a separate flow
+
+#### Install an Analytics Backend
+
+- [ ] `p1` - **ID**: `cpt-hai3-usecase-telemetry-install-backend`
+
+**Actor**: `cpt-hai3-actor-developer`
+
+**Preconditions**:
+- Generated project with telemetry enabled and no transport
+- An account with the analytics backend
+
+**Main Flow**:
+1. Developer follows the install recipe: installs the backend client and the adapter
+2. Developer creates the backend client in the shell and registers the adapter as a transport
+3. Developer connects the application's consent choice to the consent gate
+4. Developer adds the backend's ingestion endpoint to the Content Security Policy
+5. Developer opens the application and sees screen views arrive in the backend
+
+**Postconditions**:
+- Events reach the backend only for purposes the end user has granted
+- Backend features outside HAI3 (for example session replay) remain available
+
+**Alternative Flows**:
+- **Consent not granted**: No request is made to the backend; events remain visible locally in development
+- **Backend host blocked by an ad blocker**: The application works normally; the failure is counted
+- **Backend's own automatic capture overlaps with HAI3 capture**: The adapter warns in development
+
+#### Review Microfrontend Performance
+
+- [ ] `p2` - **ID**: `cpt-hai3-usecase-telemetry-mfe-performance`
+
+**Actor**: `cpt-hai3-actor-product-analyst`
+
+**Preconditions**:
+- A transport that accepts metrics is installed and performance consent is granted
+- A metric sampling rate is configured for production
+
+**Main Flow**:
+1. End users open screens that load MFEs
+2. The system reports load and mount duration per extension, with cold and warm loads distinguished, and page metrics for the shell
+3. Product Analyst compares MFEs by load and mount duration in the backend
+4. Product Analyst identifies the slowest MFE and the screens it affects
+
+**Postconditions**:
+- Performance is attributed to a specific extension, MFE package and screen
+
+**Alternative Flows**:
+- **MFE fails to load**: A failure signal is sent regardless of sampling
+- **Browser withholds transfer size for a cross-origin MFE**: The size is omitted, not estimated
+
+#### Extend the Event Catalog
+
+- [ ] `p1` - **ID**: `cpt-hai3-usecase-telemetry-extend-catalog`
+
+**Actor**: `cpt-hai3-actor-screenset-author`
+
+**Preconditions**:
+- Screenset or MFE with a business outcome worth tracking (for example a report exported)
+
+**Main Flow**:
+1. Screenset Author declares a new event, namespaced by the screenset identifier, with bounded property types
+2. Screenset Author emits the event where the outcome occurs
+3. The event appears in the locally visible stream with the context envelope attached
+
+**Postconditions**:
+- The event is type-checked wherever it is emitted and appears in the tracking plan
+
+**Alternative Flows**:
+- **Name not namespaced or malformed**: Lint rejects it
+- **Property with a forbidden name or a free-form string**: Lint rejects it unless an explicit exception is declared
+- **Event emitted from an MFE under another MFE's namespace**: The shell rejects it and counts the rejection
+
+#### Bring an Existing Project into Compliance
+
+- [ ] `p3` - **ID**: `cpt-hai3-usecase-telemetry-existing-project`
+
+**Actor**: `cpt-hai3-actor-developer`
+
+**Preconditions**:
+- Project generated before telemetry existed
+
+**Main Flow**:
+1. Developer updates the project; the build and lint still pass
+2. Developer runs the telemetry validation command and reads the coverage report
+3. Developer asks the agent to instrument one screenset; the agent adds the missing bindings and tests and re-runs the report
+4. Developer repeats per screenset, exempting what should not be tracked with a reason
+5. Developer switches enforcement on for the project
+
+**Postconditions**:
+- Coverage is 100% of recognised constructs or explicitly exempted
+- Missing instrumentation now fails validation
+
+**Alternative Flows**:
+- **Validation reports a suspected flow that is not a wizard**: Developer marks it as not a flow with a reason
+- **Files the command could not analyse**: They are listed in the report for manual review
+
 ## 9. Acceptance Criteria
 
 - [x] All published workspace packages build successfully in layer dependency order
@@ -1201,6 +1960,17 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 - [x] All formatters return `''` for invalid inputs without throwing
 - [x] Studio panel is excluded from production builds via tree-shaking
 - [x] CLI scaffolds functional project with `hai3 create` + `hai3 scaffold layout`
+- [ ] Telemetry phase 1: a freshly created project with the PostHog adapter added by the install recipe alone shows screen views and a working multi-step form funnel, including abandonment, in PostHog
+- [ ] Telemetry phase 1: the same project without the recipe makes no request to any analytics host
+- [ ] Telemetry phase 1: an agent asked to generate a screen with a form produces the form binding, verified by the agent-behaviour test suite
+- [ ] Telemetry phase 1: every form and flow in the demo application and the CLI templates is instrumented
+- [ ] Telemetry phase 2: load and mount duration appear in the backend for each MFE of the demo application, attributed to the right extension, with cold and warm loads distinguishable
+- [ ] Telemetry phase 2: the demo application's responsiveness with telemetry enabled and disabled differs by no more than run-to-run variation
+- [ ] Telemetry phase 3: the telemetry validation command reports 100% on the demo application and templates, fails when a form binding is removed, and reports a hand-built wizard as a suspected flow
+- [ ] Telemetry phase 3: a project generated before telemetry builds and lints cleanly after updating
+- [ ] Telemetry phase 3: the phase 1 demonstration works with Google Analytics 4
+- [ ] Telemetry, all phases: the minimal-app bundle threshold passes without the telemetry plugin, `npm run arch:check` passes, and an instrumented MFE runs unchanged in a shell without the telemetry plugin
+- [ ] Telemetry, all phases: an audited list of every framework-defined event and its properties shows no personal data
 
 ## 10. Dependencies
 
@@ -1220,6 +1990,10 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 | Radix UI primitives (20+ packages) | Accessible UI for local UI | p2 |
 | `recharts` | Chart visualization for local UI | p3 |
 | `sonner` | Toast notifications for local UI | p3 |
+| `web-vitals` | Standard page performance metrics for telemetry. New dependency: requires explicit approval under the guidelines' stop condition for added dependencies. Loaded only when performance capture is enabled | p2 |
+| `posthog-js` (application-installed peer) | Backend client wrapped by the PostHog adapter; supported version range set at design | p1 |
+| Google tag (application-provided) | Backend client wrapped by the Google Analytics 4 adapter | p3 |
+| `react-hook-form` (templates only) | Form library targeted by the blank MFE template's form binding; not a dependency of any @hai3 package | p1 |
 
 ## 11. Assumptions
 
@@ -1233,6 +2007,14 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 - Host application uses React 19; MFEs may use any framework implementing the lifecycle interface
 - Package version 0.4.0-alpha.0 — backward-incompatible changes are expected
 - Lodash is required for non-trivial object and array operations (per project guidelines)
+- Telemetry: the existing host-MFE contract (actions chains and shared properties) can carry telemetry events, including several in one call, with at most a schema registration; to be verified by a spike at the start of design, since telemetry phase 1 depends on it
+- Telemetry: the MFE runtime can let an MFE forward pending events before its communication channel is disposed at unmount; the current unmount order is unverified
+- Telemetry: generated projects have a test setup that generated telemetry tests can use; unverified
+- Telemetry: API services can supply route templates; where they cannot, API timing falls back to the service name
+- Telemetry: the blank MFE template has, or will gain, dialog and tabs components that can be instrumented; unverified
+- Telemetry: PostHog and Google Analytics 4 behaviours and limits referenced in the adapter requirements are from general knowledge and are to be confirmed against vendor documentation at design time
+- Telemetry: package names use the `@hai3` scope of this document; the scope currently in use is to be confirmed at design
+- Telemetry: no calendar dates are set; timeframes are expressed as telemetry phases 1 to 3, each usable on its own
 
 ## 12. Risks
 
@@ -1246,3 +2028,10 @@ Architecture MUST be verifiable via `npm run arch:check`, `arch:deps`, and `arch
 | Large change surface for breaking changes | Alpha status means API changes are expected | CLI migration runners automate codemod transformations |
 | Infinite retry loops | API/MFE retry could loop indefinitely | maxRetryDepth (default: 10) in RestProtocol; retries config (default: 2) in MfeHandlerMF |
 | Single Module Federation implementation lock-in | Only vite-plugin-federation supported | MfeHandler is abstract; custom handlers pluggable via microfrontends config |
+| Telemetry requires changes inside the MFE runtime | Performance capture and flush-before-unmount touch an SDK package every MFE depends on | Limited to telemetry phase 2; observation points are optional and inert when unused; phase 1 uses existing mechanisms only |
+| Host-MFE contract may not carry telemetry as assumed | Telemetry phase 1 shape changes if events cannot be forwarded as planned | First design task is a spike forwarding one event from the demo MFE to the shell |
+| Wizard detection is heuristic | False positives annoy developers; false negatives leave flows uncovered | Suspected flows are resolved with one explicit marking; agents add judgement; detection beyond registered components is stated as best effort |
+| Reversal of the telemetry prohibition in agent guidelines | Projects on older guidelines conflict with newer ones; agents may strip or refuse telemetry | Guideline change, telemetry API and instrumented templates ship together; existing projects start in report mode |
+| Analytics vendor behaviour drift | Adapter mappings, limits and consent calls change outside HAI3's control | Adapters are versioned independently; mappings confirmed at design time; custom mappers as fallback |
+| Personal data reaching analytics despite the data rules | An opaque-looking identifier may still be personal data in law | Human review of identifiers and exceptions; audited list of framework-defined events; nothing sent by default |
+| Telemetry scope | Three phases touch most packages, the CLI, templates, guidelines and documentation | Each phase is usable on its own; only phase 1 has tightly coupled parts |
